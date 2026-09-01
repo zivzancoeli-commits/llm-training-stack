@@ -10,9 +10,13 @@ max_steps: 200
 micro_batch_size: 1
 grad_accum: 8
 max_tokens: 1000000
+context_length: 200000
+cpu_offload: true
 notes: >
-  From-scratch 70B, random init, 8x H200 SXM ZeRO-3, 5,120 context. Token
-  budget is 1M preferred or less (2.5M hard cap). That is a systems smoke,
-  not a talking model. Do not generate toward 2.5M. No Hugging Face base
-  weights. DeepSpeed ZeRO-3 is required on the node; a laptop dry-run only
-  prints the plan.
+  From-scratch 70B, random init, 8x H200 SXM ZeRO-3, 200,000 context with
+  CPU offload of params and Adam states plus activation checkpointing.
+  That is slow on purpose. Token budget is 1M preferred or less (2.5M
+  hard cap). Systems smoke, not a talking model. Need a high-RAM node
+  (host DRAM, not the 300GB volume — Adam states are hundreds of GB).
+  No Hugging Face base weights. Launch with DeepSpeed, not single-process
+  python.

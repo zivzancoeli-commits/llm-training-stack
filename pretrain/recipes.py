@@ -20,6 +20,8 @@ RECIPE_DIR = Path(__file__).resolve().parent / "recipes"
 H200_SXM_GPU_TYPE_ID = "NVIDIA H200"
 H200_SXM_GPU_COUNT = 8
 PRETRAIN_CONTEXT = 5120
+# 70b_scratch only. 100M/7B stay at 5,120. This is still not Phase-5 350k.
+LONG_SCRATCH_CONTEXT = 200_000
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class ScratchRecipe:
     notes: str
     weight_decay: float = 0.1
     max_tokens: int = PREFERRED_TOKEN_BUDGET
+    cpu_offload: bool = False
     HARD_TOKEN_CAP: ClassVar[int] = TOKEN_HARD_CAP
 
     def cluster_bytes(self) -> int:
@@ -106,7 +109,7 @@ def load_scratch_recipe(name: str) -> ScratchRecipe:
         head_dim=int(profile["head_dim"]),
         intermediate_size=int(profile["intermediate_size"]),
         vocab_size=int(profile["vocab_size"]),
-        context_length=int(profile["context_length"]),
+        context_length=int(data.get("context_length", profile["context_length"])),
         lr=float(data.get("lr", profile.get("lr", 3.0e-4))),
         gpu_type_id=str(data.get("gpu_type_id", H200_SXM_GPU_TYPE_ID)),
         gpu_count=int(data.get("gpu_count", H200_SXM_GPU_COUNT)),
@@ -118,6 +121,7 @@ def load_scratch_recipe(name: str) -> ScratchRecipe:
         notes=str(data.get("notes") or "").strip(),
         weight_decay=float(data.get("weight_decay", profile.get("weight_decay", 0.1))),
         max_tokens=int(data.get("max_tokens", PREFERRED_TOKEN_BUDGET)),
+        cpu_offload=bool(data.get("cpu_offload", False)),
     )
     if recipe.max_tokens > ScratchRecipe.HARD_TOKEN_CAP:
         raise ValueError(
@@ -127,8 +131,18 @@ def load_scratch_recipe(name: str) -> ScratchRecipe:
         )
     if recipe.max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
-    if recipe.context_length != PRETRAIN_CONTEXT:
-        raise ValueError("from-scratch pretrain stays at 5,120 context")
+    if recipe.name == "70b_scratch":
+        if recipe.context_length != LONG_SCRATCH_CONTEXT:
+            raise ValueError(
+                "70b_scratch is pinned to 200,000 context (CPU offload). "
+                f"got {recipe.context_length}"
+            )
+        if not recipe.cpu_offload:
+            raise ValueError("70b_scratch requires cpu_offload: true at 200k context")
+    elif recipe.context_length != PRETRAIN_CONTEXT:
+        raise ValueError(
+            f"{name} stays at 5,120 context; only 70b_scratch uses 200k"
+        )
     if recipe.gpu_type_id != H200_SXM_GPU_TYPE_ID or recipe.gpu_count != H200_SXM_GPU_COUNT:
         raise ValueError("from-scratch recipes on this stack pin 8x NVIDIA H200 SXM")
     if not recipe.fits_node():

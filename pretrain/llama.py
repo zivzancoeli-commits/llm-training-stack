@@ -46,6 +46,9 @@ def build_llama(spec: LlamaBuild) -> Any:
     if spec.n_heads % spec.n_kv_heads != 0:
         raise ValueError("n_heads must be divisible by n_kv_heads")
     n_rep = spec.n_heads // spec.n_kv_heads
+    # 200k scratch uses a larger RoPE base so positions do not wrap as fast
+    # as theta=10k. This is not YaRN / Phase-5 350k scaling.
+    rope_base = 1_000_000.0 if spec.context_length >= 200_000 else 10_000.0
 
     class RMSNorm(nn.Module):
         def __init__(self, dim: int, eps: float = 1e-6):
@@ -64,7 +67,7 @@ def build_llama(spec: LlamaBuild) -> Any:
             self.k = nn.Linear(spec.hidden_size, spec.n_kv_heads * spec.head_dim, bias=False)
             self.v = nn.Linear(spec.hidden_size, spec.n_kv_heads * spec.head_dim, bias=False)
             self.o = nn.Linear(spec.hidden_size, spec.hidden_size, bias=False)
-            inv = 1.0 / (10000 ** (torch.arange(0, spec.head_dim, 2).float() / spec.head_dim))
+            inv = 1.0 / (rope_base ** (torch.arange(0, spec.head_dim, 2).float() / spec.head_dim))
             self.register_buffer("inv_freq", inv, persistent=False)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -142,8 +145,14 @@ def build_llama(spec: LlamaBuild) -> Any:
 
         def forward(self, input_ids: torch.Tensor, labels: torch.Tensor | None = None):
             x = self.embed(input_ids)
+            use_ckpt = spec.context_length >= 200_000
             for block in self.blocks:
-                x = block(x)
+                if use_ckpt:
+                    x = torch.utils.checkpoint.checkpoint(
+                        block, x, use_reentrant=False
+                    )
+                else:
+                    x = block(x)
             logits = self.lm_head(self.norm(x))
             loss = None
             if labels is not None:

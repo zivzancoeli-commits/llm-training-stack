@@ -125,6 +125,21 @@ def _run_zero3(plan: ScratchPlan, packed_cls, tokenizer) -> int:
         "gradient_clipping": 1.0,
         "steps_per_print": 1,
     }
+    if recipe.cpu_offload:
+        ds_config["zero_optimization"]["offload_param"] = {
+            "device": "cpu",
+            "pin_memory": True,
+        }
+        ds_config["zero_optimization"]["offload_optimizer"] = {
+            "device": "cpu",
+            "pin_memory": True,
+        }
+        ds_config["activation_checkpointing"] = {
+            "partition_activations": True,
+            "cpu_checkpointing": True,
+            "contiguous_memory_optimization": True,
+            "number_checkpoints": 16,
+        }
     class _LossOnly(torch.nn.Module):
         def __init__(self, inner: torch.nn.Module):
             super().__init__()
