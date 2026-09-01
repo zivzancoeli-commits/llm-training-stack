@@ -1,0 +1,20 @@
+name: 7b_lora
+base_model: Qwen/Qwen2.5-7B-Instruct
+n_params: 7000000000
+n_layers: 28
+hidden_size: 3584
+method: lora
+lora_rank: 16
+context_length: 5120
+gpu_type_id: NVIDIA H200
+gpu_count: 8
+zero_stage: 2
+learning_rate: 2.0e-4
+smoke_steps: 10
+max_steps: 500
+micro_batch_size: 2
+grad_accum: 4
+notes: >
+  Cheap adapter FT on a 7B-class instruct model. Fits on 1x H200; 8x is
+  what you asked for, so the launcher still requests 8. Prefer 7b_full
+  if you want the node busy, or 70b_lora if you want the extra memory.

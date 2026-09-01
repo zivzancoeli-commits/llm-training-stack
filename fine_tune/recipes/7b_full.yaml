@@ -1,0 +1,19 @@
+name: 7b_full
+base_model: Qwen/Qwen2.5-7B-Instruct
+n_params: 7000000000
+n_layers: 28
+hidden_size: 3584
+method: full
+lora_rank: 16
+context_length: 5120
+gpu_type_id: NVIDIA H200
+gpu_count: 8
+zero_stage: 2
+learning_rate: 1.0e-5
+smoke_steps: 10
+max_steps: 400
+micro_batch_size: 1
+grad_accum: 8
+notes: >
+  Full-parameter FT of a 7B-class instruct model across 8x H200 SXM with
+  ZeRO-2. Better GPU use than 7b_lora. Context stays 5,120.
