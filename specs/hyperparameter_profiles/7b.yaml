@@ -1,0 +1,21 @@
+name: stable_7b
+phase: 2
+params: 7000000000
+n_layers: 32
+hidden_size: 4096
+n_heads: 32
+n_kv_heads: 8
+head_dim: 128
+intermediate_size: 11008
+vocab_size: 32000
+context_length: 5120
+context_length_extension: null
+tokens: 40000000000
+precision: bf16
+optimizer: adamw
+lr: 1.5e-4
+weight_decay: 0.1
+reasoning_mix_ratio: 0.45
+notes: >
+  Llama-7B-shaped. Last phase that should fit on a single 8x80GB node with
+  ZeRO-2. Context stays 5,120 on purpose.

@@ -1,0 +1,21 @@
+name: reasoning_1b
+phase: 1
+params: 1000000000
+n_layers: 16
+hidden_size: 2048
+n_heads: 16
+n_kv_heads: 4
+head_dim: 128
+intermediate_size: 5632
+vocab_size: 32000
+context_length: 5120
+context_length_extension: null
+tokens: 10000000000
+precision: bf16
+optimizer: adamw
+lr: 2.0e-4
+weight_decay: 0.1
+reasoning_mix_ratio: 0.60
+notes: >
+  Under-Chinchilla on tokens (0.5x) but a higher reasoning mix. GQA (4 KV
+  heads) is introduced here so later 7B/70B GQA is not a surprise.

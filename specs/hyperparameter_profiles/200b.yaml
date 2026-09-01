@@ -1,0 +1,23 @@
+name: frontier_200b
+phase: 4
+params: 200000000000
+n_layers: 82
+hidden_size: 14336
+n_heads: 112
+n_kv_heads: 8
+head_dim: 128
+intermediate_size: 35840
+vocab_size: 32000
+context_length: 5120
+context_length_extension: 350208
+tokens_pretrain: 300000000000
+tokens_context_extension: 10000000000
+precision: bf16
+optimizer: adamw
+lr: 6.0e-5
+weight_decay: 0.1
+reasoning_mix_ratio: 0.30
+notes: >
+  Width/depth are a proposal (12 * L * d^2 ≈ 200B class). Pretrain at 5,120.
+  Phase 5 (same weights) extends RoPE + context-parallel to 350,208. Do not
+  pretrain the 200B at 350k.

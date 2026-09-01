@@ -1,0 +1,21 @@
+name: proxy_100m
+phase: 0
+params: 100000000
+n_layers: 12
+hidden_size: 768
+n_heads: 12
+n_kv_heads: 12
+head_dim: 64
+intermediate_size: 2048
+vocab_size: 32000
+context_length: 5120
+context_length_extension: null
+tokens: 2000000000
+precision: bf16
+optimizer: adamw
+lr: 3.0e-4
+weight_decay: 0.1
+reasoning_mix_ratio: 0.50
+notes: >
+  Full Chinchilla token budget. Half the mix is math/code/short CoT so the
+  proxy already exercises reasoning evals used at 1B and 7B.
