@@ -1,0 +1,33 @@
+"""Public GitHub clone URLs the RunPod bootstrap uses.
+
+RunPod cannot clone a Cursor codebase page. It needs GitHub HTTPS.
+These repos live under ``zivzancoeli-commits``. Both were created
+private; a pod clone 404s until they are **public** or the pod has
+``GITHUB_TOKEN``.
+"""
+
+from __future__ import annotations
+
+DATASET_OWNER = "zivzancoeli-commits"
+DATASET_REPO = "llm-dataset"
+TRAINING_STACK_REPO = "llm-training-stack"
+
+DEFAULT_DATASET_GIT_URL = f"https://github.com/{DATASET_OWNER}/{DATASET_REPO}.git"
+DEFAULT_TRAINING_GIT_URL = f"https://github.com/{DATASET_OWNER}/{TRAINING_STACK_REPO}.git"
+
+# macOS duplicate-download name from GitHub web upload, plus the tracked name.
+TAKEHOME_ZIP_NAMES = (
+    "scratch70b_1m_takehome.zip",
+    "scratch70b_1m_takehome 2.zip",
+)
+
+
+def authed_clone_url(https_url: str, token: str | None) -> str:
+    """Insert a PAT so ``git clone`` works on a private GitHub repo."""
+    token = (token or "").strip()
+    if not token:
+        return https_url
+    prefix = "https://"
+    if https_url.startswith(prefix):
+        return f"{prefix}x-access-token:{token}@{https_url[len(prefix):]}"
+    return https_url
