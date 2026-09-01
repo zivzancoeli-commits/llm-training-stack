@@ -1,0 +1,17 @@
+name: 7b_scratch
+init: random
+profile: 7b
+gpu_type_id: NVIDIA H200
+gpu_count: 8
+zero_stage: 2
+lr: 2.0e-4
+smoke_steps: 10
+max_steps: 300
+micro_batch_size: 1
+grad_accum: 8
+max_tokens: 1000000
+notes: >
+  From-scratch 7B, random init, ZeRO-2 on 8x H200. Same 1M-token cap
+  (prefer 1M or less; 2.5M hard). Still not a fluent model at 1M tokens;
+  use this if 70B OOM/config work is too expensive for a first real loss
+  curve.

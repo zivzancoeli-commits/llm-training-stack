@@ -1,0 +1,17 @@
+name: 100m_scratch
+init: random
+profile: 100m
+gpu_type_id: NVIDIA H200
+gpu_count: 8
+zero_stage: 2
+lr: 3.0e-4
+smoke_steps: 10
+max_steps: 400
+micro_batch_size: 1
+grad_accum: 8
+max_tokens: 1000000
+notes: >
+  From-scratch 100M on at most 1M tokens, preferably fewer (hard cap 2.5M).
+  Random init, no Qwen/Llama checkpoint. 1M tokens will not Chinchilla-train
+  100M (that wants ~2B). This is the cheap loop check before 70b_scratch.
+  8x H200 is oversized; 1x GPU is enough.

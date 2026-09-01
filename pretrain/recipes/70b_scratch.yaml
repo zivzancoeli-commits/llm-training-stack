@@ -1,0 +1,18 @@
+name: 70b_scratch
+init: random
+profile: 70b
+gpu_type_id: NVIDIA H200
+gpu_count: 8
+zero_stage: 3
+lr: 8.0e-5
+smoke_steps: 10
+max_steps: 200
+micro_batch_size: 1
+grad_accum: 8
+max_tokens: 1000000
+notes: >
+  From-scratch 70B, random init, 8x H200 SXM ZeRO-3, 5,120 context. Token
+  budget is 1M preferred or less (2.5M hard cap). That is a systems smoke,
+  not a talking model. Do not generate toward 2.5M. No Hugging Face base
+  weights. DeepSpeed ZeRO-3 is required on the node; a laptop dry-run only
+  prints the plan.
