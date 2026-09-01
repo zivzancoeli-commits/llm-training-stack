@@ -20,7 +20,7 @@ GitHub (what RunPod clones):
   (`scratch70b_1m_takehome 2.zip` on `main`)
 - Training stack: https://github.com/zivzancoeli-commits/llm-training-stack
 
-Those repos must be **public** (or the pod needs `GITHUB_TOKEN`).
+Both are public HTTPS clone URLs. The pod does not need a GitHub token.
 
 The review UI is how you go through the seed corpus. From-scratch
 training is random init on **1M tokens preferred, or less (2.5M hard cap)**:

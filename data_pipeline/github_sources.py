@@ -1,9 +1,8 @@
 """Public GitHub clone URLs the RunPod bootstrap uses.
 
 RunPod cannot clone a Cursor codebase page. It needs GitHub HTTPS.
-These repos live under ``zivzancoeli-commits``. Both were created
-private; a pod clone 404s until they are **public** or the pod has
-``GITHUB_TOKEN``.
+These repos live under ``zivzancoeli-commits`` and are **public**, so a
+pod can ``git clone`` them without a token.
 """
 
 from __future__ import annotations
