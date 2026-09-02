@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset-git-url",
         default="",
         help="Dataset clone URL. Default: "
-        "github.com/zivzancoeli-commits/llm-dataset",
+        "github.com/zivzancoeli-commits/llm--dataset",
     )
     slaunch.add_argument("--dry-run", action="store_true", default=True)
     slaunch.add_argument("--confirm", action="store_true")

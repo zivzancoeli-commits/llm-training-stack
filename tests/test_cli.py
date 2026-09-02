@@ -25,8 +25,9 @@ def test_scratch_plan_is_random_init(capsys: pytest.CaptureFixture[str]) -> None
     assert payload["max_tokens"] == 1_000_000
     assert payload["preferred_tokens"] == 1_000_000
     assert payload["hard_token_cap"] == 2_500_000
-    assert payload["max_tokens"] < payload["hard_token_cap"]
     assert payload["recipe"]["gpu_count"] == 8
+    assert payload["recipe"]["context_length"] == 200000
+    assert payload["recipe"]["cpu_offload"] is True
 
 
 def test_ft_plan_json(capsys: pytest.CaptureFixture[str]) -> None:
@@ -67,7 +68,7 @@ def test_scratch_launch_default_is_dry_run_and_deepspeed(capsys: pytest.CaptureF
     assert "pretrain.train" in joined
     assert "deepspeed" in joined
     assert "fine_tune.train" not in joined
-    assert "github.com/zivzancoeli-commits/llm-dataset" in joined
+    assert "github.com/zivzancoeli-commits/llm--dataset" in joined
     assert "find_takehome_zip" in joined
     assert payload["body"]["env"]["LMM_GIT_URL"] == (
         "https://github.com/zivzancoeli-commits/llm-training-stack.git"
@@ -103,9 +104,40 @@ def test_data_import_takehome_zip(tmp_path, monkeypatch, capsys: pytest.CaptureF
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.write(src / "math-001.md", arcname="scratch70b_1m_takehome/scratch70b_v0/math/math-001.md")
     dest = tmp_path / "datasets"
+    leftover = dest / "scratch70b_v0" / "math" / "math-999.md"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("# leftover\n")
     copied = import_takehome_zip(zip_path, dest_root=dest)
     assert copied["scratch70b_v0"] == 1
     assert (dest / "scratch70b_v0" / "math" / "math-001.md").is_file()
+    assert not leftover.is_file()
+
+
+def test_data_import_renames_chat_zero_to_frontmatter_id(tmp_path) -> None:
+    from data_pipeline.import_zip import import_takehome_zip
+
+    zip_path = tmp_path / "tiny.zip"
+    src = tmp_path / "scratch70b_sft_2p5m" / "chat"
+    src.mkdir(parents=True)
+    body = "word " * 200
+    (src / "chat-0.md").write_text(
+        "---\nid: chat-0625\ncategory: chat\nsubcategory: everyday-dialogue\n"
+        "difficulty: easy\nsource_model: cursor-grok\ntitle: Tiny\n"
+        "approx_words: 200\nskills: [conversational]\n---\n" + body
+    )
+    import zipfile
+
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.write(src / "chat-0.md", arcname="scratch70b_sft_2p5m/chat/chat-0.md")
+    dest = tmp_path / "datasets"
+    leftover = dest / "scratch70b_sft_2p5m" / "chat" / "chat-0628.md"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("# leftover\n")
+    copied = import_takehome_zip(zip_path, dest_root=dest)
+    assert copied["scratch70b_sft_2p5m"] == 1
+    assert (dest / "scratch70b_sft_2p5m" / "chat" / "chat-0625.md").is_file()
+    assert not (dest / "scratch70b_sft_2p5m" / "chat" / "chat-0.md").is_file()
+    assert not leftover.is_file()
 
 
 def test_check_forwards_pytest_flags(monkeypatch: pytest.MonkeyPatch) -> None:

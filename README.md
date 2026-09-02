@@ -16,8 +16,8 @@ uv run lmm data-review
 
 GitHub (what RunPod clones):
 
-- Dataset zip: https://github.com/zivzancoeli-commits/llm-dataset
-  (`scratch70b_1m_takehome 2.zip` on `main`)
+- Reviewed dataset zip: https://github.com/zivzancoeli-commits/llm--dataset
+  (`scratch70b_1m_takehome.zip` on `main`)
 - Training stack: https://github.com/zivzancoeli-commits/llm-training-stack
 
 Both are public HTTPS clone URLs. The pod does not need a GitHub token.

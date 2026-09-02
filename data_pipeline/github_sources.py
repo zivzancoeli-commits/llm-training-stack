@@ -8,13 +8,14 @@ pod can ``git clone`` them without a token.
 from __future__ import annotations
 
 DATASET_OWNER = "zivzancoeli-commits"
-DATASET_REPO = "llm-dataset"
+# Double dash is the repo the reviewed zip was uploaded to (not llm-dataset).
+DATASET_REPO = "llm--dataset"
 TRAINING_STACK_REPO = "llm-training-stack"
 
 DEFAULT_DATASET_GIT_URL = f"https://github.com/{DATASET_OWNER}/{DATASET_REPO}.git"
 DEFAULT_TRAINING_GIT_URL = f"https://github.com/{DATASET_OWNER}/{TRAINING_STACK_REPO}.git"
 
-# macOS duplicate-download name from GitHub web upload, plus the tracked name.
+# Canonical name plus the macOS duplicate-download name from GitHub web.
 TAKEHOME_ZIP_NAMES = (
     "scratch70b_1m_takehome.zip",
     "scratch70b_1m_takehome 2.zip",

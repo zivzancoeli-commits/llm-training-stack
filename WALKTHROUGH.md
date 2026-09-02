@@ -99,35 +99,31 @@ No GPU. No Fable/Opus calls.
 Or read the markdown in `data_pipeline/datasets/scratch70b_v0/{math,code,...}/`.
 `source_model` in the frontmatter is `fable-5`, `opus-5`, or `cursor-grok`.
 
-When you are done marking, say so. Then we can talk 70B-from-scratch on
-8× H200. Not before.
+The reviewed mix is uploaded at
+https://github.com/zivzancoeli-commits/llm--dataset
+(`scratch70b_1m_takehome.zip`). That is what the 70B scratch job packs.
 
 ## 4. From-scratch 70B on 8x H200 SXM
 
 This is **random init**, not Qwen. Context is **200,000** on `70b_scratch`
-(CPU offload + activation checkpointing). Data is ~706k tokens, packed
-into 200k-length rows (about four rows). That will not make a fluent
-70B; it is a slow systems smoke. 100M/7B scratch jobs stay at 5,120.
+(CPU offload + activation checkpointing). Data is the reviewed zip
+(~700k heuristic tokens), packed into 200k-length rows (about four
+rows). That will not make a fluent 70B; it is a slow systems smoke.
+100M/7B scratch jobs stay at 5,120.
 
 Do **not** use `lmm ft-launch` or recipe `70b_lora` for this job.
 
 ### Download the zip
 
-The **updated** mix (628 chats + seed docs) is in this repo:
+The mix you signed off on is the zip at:
 
-`data_pipeline/datasets/scratch70b_1m_takehome.zip`
+https://github.com/zivzancoeli-commits/llm--dataset
 
-In Cursor, open that file in the file tree and download it. After you
-`git clone` the training stack on the pod, the same path is already
-there — you can import it without a second download:
+(`scratch70b_1m_takehome.zip` on `main`). A copy also lives in this
+repo at `data_pipeline/datasets/scratch70b_1m_takehome.zip`.
 
-```bash
-python -c "from pathlib import Path; from data_pipeline.import_zip import import_takehome_zip; print(import_takehome_zip(Path('data_pipeline/datasets/scratch70b_1m_takehome.zip')))"
-```
-
-https://github.com/zivzancoeli-commits/llm-dataset still has the **old**
-Mac upload (`scratch70b_1m_takehome 2.zip`, 228 chats). Use the repo zip
-above if you want the extra 400 chats.
+https://github.com/zivzancoeli-commits/llm-dataset is the **old**
+Mac upload (228 chats). Do not clone that for this run.
 
 ### A. Laptop (free)
 
@@ -143,7 +139,7 @@ uv run lmm scratch-plan --recipe 70b_scratch
 
    | What | URL |
    | --- | --- |
-   | Zip you uploaded | https://github.com/zivzancoeli-commits/llm-dataset |
+   | Zip you uploaded | https://github.com/zivzancoeli-commits/llm--dataset |
    | Training stack | https://github.com/zivzancoeli-commits/llm-training-stack |
 
    Both are **public**. Clone the stack for code, clone the dataset for
@@ -155,7 +151,7 @@ uv run lmm scratch-plan --recipe 70b_scratch
 ```bash
 uv run lmm scratch-launch --recipe 70b_scratch --dry-run \
   --git-url https://github.com/zivzancoeli-commits/llm-training-stack.git \
-  --dataset-git-url https://github.com/zivzancoeli-commits/llm-dataset.git
+  --dataset-git-url https://github.com/zivzancoeli-commits/llm--dataset.git
 ```
 
 ### B. RunPod UI (what you are filling in now)
@@ -196,7 +192,7 @@ you would rather not `git clone`.
 Or clone the zip from GitHub (now public) instead of dragging it:
 
 ```bash
-git clone --depth 1 https://github.com/zivzancoeli-commits/llm-dataset.git /workspace/llm-dataset
+git clone --depth 1 https://github.com/zivzancoeli-commits/llm--dataset.git /workspace/llm-dataset
 python -c "from pathlib import Path; from data_pipeline.import_zip import find_takehome_zip, import_takehome_zip; print(import_takehome_zip(find_takehome_zip(Path('/workspace/llm-dataset'))))"
 ```
 
@@ -223,7 +219,7 @@ done. 8× H200 is expensive idle.
 - `nvidia-smi` shows 8 H200s.
 - Smoke prints a loss for 10 steps and does not OOM.
 - Full run writes `outputs/70b_scratch/ds/` and `tokenizer.json`.
-- The model will **not** chat. ~706k tokens at 200k context on a 70B is a fit/loss check.
+- The model will **not** chat. ~700k tokens at 200k context on a 70B is a fit/loss check.
 
 Optional Qwen instruct FT is a **different** job (`lmm ft-launch`, recipe
 `70b_lora`). Do not mix it with this from-scratch run.
