@@ -104,11 +104,30 @@ When you are done marking, say so. Then we can talk 70B-from-scratch on
 
 ## 4. From-scratch 70B on 8x H200 SXM
 
-This is **random init**, not Qwen. Context is **5,120**. Data is the
-take-home zip (~327k tokens, packed at 1M max). That will not make a
-fluent 70B; it is a systems smoke that uses your writing.
+This is **random init**, not Qwen. Context is **200,000** on `70b_scratch`
+(CPU offload + activation checkpointing). Data is ~706k tokens, packed
+into 200k-length rows (about four rows). That will not make a fluent
+70B; it is a slow systems smoke. 100M/7B scratch jobs stay at 5,120.
 
 Do **not** use `lmm ft-launch` or recipe `70b_lora` for this job.
+
+### Download the zip
+
+The **updated** mix (628 chats + seed docs) is in this repo:
+
+`data_pipeline/datasets/scratch70b_1m_takehome.zip`
+
+In Cursor, open that file in the file tree and download it. After you
+`git clone` the training stack on the pod, the same path is already
+there — you can import it without a second download:
+
+```bash
+python -c "from pathlib import Path; from data_pipeline.import_zip import import_takehome_zip; print(import_takehome_zip(Path('data_pipeline/datasets/scratch70b_1m_takehome.zip')))"
+```
+
+https://github.com/zivzancoeli-commits/llm-dataset still has the **old**
+Mac upload (`scratch70b_1m_takehome 2.zip`, 228 chats). Use the repo zip
+above if you want the extra 400 chats.
 
 ### A. Laptop (free)
 
@@ -127,11 +146,9 @@ uv run lmm scratch-plan --recipe 70b_scratch
    | Zip you uploaded | https://github.com/zivzancoeli-commits/llm-dataset |
    | Training stack | https://github.com/zivzancoeli-commits/llm-training-stack |
 
-   `llm-training-stack` is **public**. `llm-dataset` is **private**
-   right now — a pod `git clone` 404s until you set it public (GitHub →
-   Settings → Change repository visibility) or export `GITHUB_TOKEN`.
-   The training stack already contains the unzipped corpus, so smoke
-   can run from that clone alone.
+   Both are **public**. Clone the stack for code, clone the dataset for
+   the zip (or drag the zip onto the pod). The stack clone on GitHub may
+   not include every markdown file; importing the zip is the complete mix.
 
 3. Optional dry-run of the pod JSON (does not bill):
 
@@ -157,29 +174,36 @@ Deploy. Wait until the pod is running. Open a terminal.
 
 ### C. On the pod
 
-If the GitHub repos are **public**, clone both (the zip filename has a
-space; `find_takehome_zip` handles that):
+**Simplest: drag the zip.** Open Jupyter on the pod and drop
+`scratch70b_1m_takehome 2.zip` into `/workspace`. You still need the
+training code (that is not inside the zip). Clone the public stack,
+then import what you uploaded:
 
 ```bash
 cd /workspace
 git clone --depth 1 https://github.com/zivzancoeli-commits/llm-training-stack.git lmm
-git clone --depth 1 https://github.com/zivzancoeli-commits/llm-dataset.git llm-dataset
 cd lmm
 python -m pip install -U pip
 python -m pip install pyyaml pytest deepspeed
-python -c "from pathlib import Path; from data_pipeline.import_zip import find_takehome_zip, import_takehome_zip; z=find_takehome_zip(Path('/workspace/llm-dataset')); print(import_takehome_zip(z))"
+python -c "from pathlib import Path; from data_pipeline.import_zip import import_takehome_zip; print(import_takehome_zip(Path('/workspace/scratch70b_1m_takehome 2.zip')))"
 python -m pytest tests/test_scratch_pretrain.py tests/test_token_budget.py -q
 ```
 
-If either repo is private, export a GitHub PAT first:
+Dragging only the zip is not enough: it has markdown, not DeepSpeed or
+the 70B recipe. Dragging the whole training-stack folder also works if
+you would rather not `git clone`.
+
+Or clone the zip from GitHub (now public) instead of dragging it:
 
 ```bash
-export GITHUB_TOKEN=ghp_...
-git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/zivzancoeli-commits/llm-training-stack.git" lmm
-git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/zivzancoeli-commits/llm-dataset.git" llm-dataset
+git clone --depth 1 https://github.com/zivzancoeli-commits/llm-dataset.git /workspace/llm-dataset
+python -c "from pathlib import Path; from data_pipeline.import_zip import find_takehome_zip, import_takehome_zip; print(import_takehome_zip(find_takehome_zip(Path('/workspace/llm-dataset'))))"
 ```
 
-**10-step smoke first** (still bills the node; stop if this OOMs):
+**10-step smoke first** (still bills the node; 200k context is slow because
+params/Adam sit in host RAM). Pick an 8× H200 SXM SKU with **a lot of
+system RAM** (on the order of a terabyte). The 300GB volume is not the
+offload device.
 
 ```bash
 deepspeed --num_gpus 8 -m pretrain.train --recipe 70b_scratch --smoke
@@ -199,7 +223,7 @@ done. 8× H200 is expensive idle.
 - `nvidia-smi` shows 8 H200s.
 - Smoke prints a loss for 10 steps and does not OOM.
 - Full run writes `outputs/70b_scratch/ds/` and `tokenizer.json`.
-- The model will **not** chat. ~327k tokens on a 70B is a fit/loss check.
+- The model will **not** chat. ~706k tokens at 200k context on a 70B is a fit/loss check.
 
 Optional Qwen instruct FT is a **different** job (`lmm ft-launch`, recipe
 `70b_lora`). Do not mix it with this from-scratch run.
@@ -207,6 +231,6 @@ Optional Qwen instruct FT is a **different** job (`lmm ft-launch`, recipe
 ## 5. Laptop gate
 
 - `uv run lmm check` → all tests passed.
-- YAML still has `context_length: 5120`.
+- YAML profiles still have `context_length: 5120` (roadmap). `70b_scratch` overrides to **200000**.
 - Recipes still say `gpu_type_id: NVIDIA H200` (not `H200 NVL`).
 - `scratch-launch` / `ft-launch` without `--confirm` never mentions a `pod_id`.

@@ -5,9 +5,9 @@ Two folders. Edit the markdown. Send it back before any GPU job.
 | Folder | What it is |
 | --- | --- |
 | `scratch70b_v0/` | **114** seed docs (~99k heuristic tokens). Math, code, science, logic, habits, world, how-things-work. Review this first. |
-| `scratch70b_sft_2p5m/` | Extra mix. Folder name is historical. Right now **228 chat** docs (~228k tokens). **Pack at 1M tokens or less** (2.5M hard cap). |
+| `scratch70b_sft_2p5m/` | Extra mix. Folder name is historical. Right now **628 chat** docs (~607k tokens). **Pack at 1M tokens or less** (2.5M hard cap). |
 
-Together this zip is about **327k** heuristic tokens — already under the 1M preferred budget. This is **not** a trained 70B. 1M tokens will not make one talk.
+Together this mix is about **706k** heuristic tokens — still under the 1M preferred budget. This is **not** a trained 70B. 1M tokens will not make one talk.
 
 ## Token budget
 
@@ -56,8 +56,9 @@ uv run lmm check tests/test_scratch70b_dataset.py tests/test_sft_2p5m_dataset.py
 2. Commit, push, and say the branch name, or
 3. Paste keep/drop/rewrite notes.
 
-GitHub copy of this zip (same bytes):
-https://github.com/zivzancoeli-commits/llm-dataset
-File name on GitHub is `scratch70b_1m_takehome 2.zip` (macOS duplicate).
+GitHub `llm-dataset` still has the **old** 228-chat Mac zip. The
+**current** mix (628 chats) is `data_pipeline/datasets/scratch70b_1m_takehome.zip`
+in this repo. Download that file from the Cursor file tree, or use it
+on the pod after cloning the training stack.
 
 Do **not** start an 8× H200 job until you sign off on the writing.
