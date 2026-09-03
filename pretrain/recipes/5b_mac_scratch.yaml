@@ -1,0 +1,20 @@
+name: 5b_mac_scratch
+init: random
+profile: 5b_mac
+gpu_type_id: CPU
+gpu_count: 1
+zero_stage: 0
+disk_offload: true
+lr: 1.0e-4
+smoke_steps: 1
+max_steps: 300
+micro_batch_size: 1
+grad_accum: 16
+checkpoint_every: 10
+max_tokens: 1000000
+notes: >
+  Approximately 5.1B random-init parameters at 5,120 context on an Intel
+  Mac with 16GB DDR3. There is no MPS. One transformer block stays in RAM;
+  weights, Adam moments, and activations stream from SSD. Needs ~80GB free
+  disk. Expect hours–days per optimizer step and heavy SSD wear. 1M tokens
+  will not make a useful 5B model.

@@ -1,0 +1,21 @@
+name: mac_5b
+phase: 2
+params: 5100000000
+n_layers: 28
+hidden_size: 4096
+n_heads: 32
+n_kv_heads: 8
+head_dim: 128
+intermediate_size: 11008
+vocab_size: 32000
+context_length: 5120
+context_length_extension: null
+tokens: 1000000
+precision: fp16
+optimizer: adamw
+lr: 1.0e-4
+weight_decay: 0.1
+reasoning_mix_ratio: 0.45
+notes: >
+  Approximately 5.1B parameters, Llama-shaped, for a 16GB DDR3 Intel Mac
+  using layer-wise SSD offload. Not Apple Silicon / MPS. Intentionally slow.
