@@ -10,6 +10,7 @@ build/
 .uv/
 *.log
 .DS_Store
+outputs/
 data_pipeline/datasets/scratch70b_v0/review_decisions.json
 *.zip
 !data_pipeline/datasets/scratch70b_1m_takehome.zip

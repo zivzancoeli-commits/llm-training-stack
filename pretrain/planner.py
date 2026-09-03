@@ -29,7 +29,7 @@ class ScratchPlan:
 
 
 def plan_scratch(recipe: ScratchRecipe, *, smoke: bool = True) -> ScratchPlan:
-    if not recipe.fits_node():
+    if not recipe.disk_offload and not recipe.fits_node():
         raise ValueError(f"{recipe.name} does not fit 8x H200")
     return ScratchPlan(
         recipe=recipe,
