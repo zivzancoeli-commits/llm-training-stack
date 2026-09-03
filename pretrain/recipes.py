@@ -19,6 +19,7 @@ from specs.profiles import load_profile
 RECIPE_DIR = Path(__file__).resolve().parent / "recipes"
 H200_SXM_GPU_TYPE_ID = "NVIDIA H200"
 H200_SXM_GPU_COUNT = 8
+CPU_GPU_TYPE_ID = "CPU"
 PRETRAIN_CONTEXT = 5120
 # 70b_scratch only. 100M/7B stay at 5,120. This is still not Phase-5 350k.
 LONG_SCRATCH_CONTEXT = 200_000
@@ -49,6 +50,8 @@ class ScratchRecipe:
     weight_decay: float = 0.1
     max_tokens: int = PREFERRED_TOKEN_BUDGET
     cpu_offload: bool = False
+    disk_offload: bool = False
+    checkpoint_every: int = 0
     HARD_TOKEN_CAP: ClassVar[int] = TOKEN_HARD_CAP
 
     def cluster_bytes(self) -> int:
@@ -122,6 +125,8 @@ def load_scratch_recipe(name: str) -> ScratchRecipe:
         weight_decay=float(data.get("weight_decay", profile.get("weight_decay", 0.1))),
         max_tokens=int(data.get("max_tokens", PREFERRED_TOKEN_BUDGET)),
         cpu_offload=bool(data.get("cpu_offload", False)),
+        disk_offload=bool(data.get("disk_offload", False)),
+        checkpoint_every=int(data.get("checkpoint_every", 0)),
     )
     if recipe.max_tokens > ScratchRecipe.HARD_TOKEN_CAP:
         raise ValueError(
@@ -143,9 +148,21 @@ def load_scratch_recipe(name: str) -> ScratchRecipe:
         raise ValueError(
             f"{name} stays at 5,120 context; only 70b_scratch uses 200k"
         )
-    if recipe.gpu_type_id != H200_SXM_GPU_TYPE_ID or recipe.gpu_count != H200_SXM_GPU_COUNT:
-        raise ValueError("from-scratch recipes on this stack pin 8x NVIDIA H200 SXM")
-    if not recipe.fits_node():
+    is_cpu = recipe.gpu_type_id == CPU_GPU_TYPE_ID
+    if is_cpu:
+        if not recipe.disk_offload:
+            raise ValueError("CPU scratch recipes require disk_offload: true")
+        if recipe.gpu_count != 1 or recipe.zero_stage != 0:
+            raise ValueError("CPU SSD offload recipes require gpu_count: 1 and zero_stage: 0")
+        if recipe.cpu_offload:
+            raise ValueError("disk_offload is layer-wise SSD streaming, not DeepSpeed cpu_offload")
+    elif recipe.disk_offload:
+        raise ValueError("disk_offload requires gpu_type_id: CPU")
+    elif recipe.gpu_type_id != H200_SXM_GPU_TYPE_ID or recipe.gpu_count != H200_SXM_GPU_COUNT:
+        raise ValueError("scratch recipes must target 8x NVIDIA H200 SXM or 1x CPU with disk_offload")
+    if recipe.checkpoint_every < 0:
+        raise ValueError("checkpoint_every cannot be negative")
+    if not is_cpu and not recipe.fits_node():
         raise ValueError(
             f"{recipe.name} does not fit {recipe.gpu_count}x H200 "
             f"({recipe.cluster_bytes()} bytes)"
