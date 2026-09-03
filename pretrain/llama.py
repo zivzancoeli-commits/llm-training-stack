@@ -38,9 +38,10 @@ class LlamaBuild:
         )
 
 
-def build_llama(spec: LlamaBuild) -> Any:
-    """Construct a randomly initialized causal LM. Requires torch."""
+def llama_parts(spec: LlamaBuild) -> Any:
+    """RMSNorm / Block / LlamaLM closed over ``spec``."""
     import math
+    from types import SimpleNamespace
 
     import torch
     from torch import nn
@@ -109,8 +110,8 @@ def build_llama(spec: LlamaBuild) -> Any:
             return linear(x)
         return torch.cat([linear(sl) for sl in x.split(chunk, dim=1)], dim=1)
 
-    class _ChunkedFlashAttn(torch.autograd.Function):
-        """One saved K/V; flash per query chunk. Avoids 391 SDPA graphs and math scores."""
+    class _ChunkedTiledAttn(torch.autograd.Function):
+        """One saved K/V; recompute bounded score tiles during backward."""
 
         @staticmethod
         def forward(ctx, k, v, x, w_q, cos, sin):
@@ -137,16 +138,17 @@ def build_llama(spec: LlamaBuild) -> Any:
             x = x.detach().requires_grad_(True)
             w_q = w_q.detach().requires_grad_(True)
             b, _, s, _ = k.shape
-            start = 0
-            while start < s:
-                end = min(start + chunk, s)
-                q = F.linear(x[:, start:end], w_q).view(
-                    b, end - start, spec.n_heads, spec.head_dim
-                )
-                q = _apply_rope(q, cos[start:end], sin[start:end]).transpose(1, 2)
-                y_c = _tiled_causal_attn(q, k[:, :, :end], v[:, :, :end])
-                y_c.backward(dy[:, :, start:end])
-                start = end
+            with torch.enable_grad():
+                start = 0
+                while start < s:
+                    end = min(start + chunk, s)
+                    q = F.linear(x[:, start:end], w_q).view(
+                        b, end - start, spec.n_heads, spec.head_dim
+                    )
+                    q = _apply_rope(q, cos[start:end], sin[start:end]).transpose(1, 2)
+                    y_c = _tiled_causal_attn(q, k[:, :, :end], v[:, :, :end])
+                    y_c.backward(dy[:, :, start:end])
+                    start = end
             return k.grad, v.grad, x.grad, w_q.grad, None, None
 
     class Attention(nn.Module):
@@ -169,7 +171,7 @@ def build_llama(spec: LlamaBuild) -> Any:
                 self.k(x).view(b, s, spec.n_kv_heads, spec.head_dim), cos, sin
             ).transpose(1, 2)
             v = self.v(x).view(b, s, spec.n_kv_heads, spec.head_dim).transpose(1, 2)
-            y = _ChunkedFlashAttn.apply(k, v, x, self.q.weight, cos, sin)
+            y = _ChunkedTiledAttn.apply(k, v, x, self.q.weight, cos, sin)
             y = y.transpose(1, 2).contiguous().view(b, s, spec.hidden_size)
             return _linear_chunks(self.o, y)
 
@@ -203,7 +205,7 @@ def build_llama(spec: LlamaBuild) -> Any:
             return x
 
     def _run_block(block: nn.Module, h: torch.Tensor) -> torch.Tensor:
-        if spec.context_length < 200_000:
+        if spec.context_length < 5120 or not block.training:
             return block(h)
         # Do not wrap DeepSpeed checkpoint in except-retry: a kernel error
         # inside the block was re-run a second time on the same GPUs.
@@ -250,4 +252,9 @@ def build_llama(spec: LlamaBuild) -> Any:
             return None, total / ntok
 
     _ = math  # kept for possible later μP scaling
-    return LlamaLM()
+    return SimpleNamespace(RMSNorm=RMSNorm, Block=Block, LlamaLM=LlamaLM)
+
+
+def build_llama(spec: LlamaBuild) -> Any:
+    """Construct a randomly initialized causal LM. Requires torch."""
+    return llama_parts(spec).LlamaLM()
