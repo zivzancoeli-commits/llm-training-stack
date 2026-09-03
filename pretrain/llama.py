@@ -55,10 +55,6 @@ def build_llama(spec: LlamaBuild) -> Any:
     # 200k scratch uses a larger RoPE base so positions do not wrap as fast
     # as theta=10k. This is not YaRN / Phase-5 350k scaling.
     rope_base = 1_000_000.0 if spec.context_length >= 200_000 else 10_000.0
-    if torch.cuda.is_available():
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-        torch.backends.cuda.enable_math_sdp(False)
 
     class RMSNorm(nn.Module):
         def __init__(self, dim: int, eps: float = 1e-6):
@@ -78,27 +74,35 @@ def build_llama(spec: LlamaBuild) -> Any:
         out = torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
         return out.flatten(-2)
 
-    def _sdpa_flash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        # Math SDPA materializes 64×Q×K scores (~6 GiB at 200k). Never allow it.
-        # FLASH causal often rejects Lq != Lk (query chunks vs prefix K); use
-        # memory-efficient attention there instead of falling back to math.
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-
-        kwargs = dict(dropout_p=0.0, is_causal=True)
-        if q.size(2) == k.size(2):
-            backends = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
-        else:
-            backends = [SDPBackend.EFFICIENT_ATTENTION]
-        with sdpa_kernel(backends):
-            try:
-                return F.scaled_dot_product_attention(
-                    q, k, v, enable_gqa=n_rep > 1, **kwargs
-                )
-            except TypeError:
-                if n_rep > 1:
-                    k = k.repeat_interleave(n_rep, dim=1)
-                    v = v.repeat_interleave(n_rep, dim=1)
-                return F.scaled_dot_product_attention(q, k, v, **kwargs)
+    def _tiled_causal_attn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Causal GQA in 512×512 tiles. No SDPA (FLASH/GQA/Lq≠Lk has no kernel on H200)."""
+        _, _, tq, d = q.shape
+        tk = k.size(2)
+        scale = d ** -0.5
+        q_start = tk - tq
+        qf = q.float()
+        out = torch.zeros_like(qf)
+        m = q.new_full((*q.shape[:3], 1), -1e9, dtype=torch.float32)
+        denom = torch.zeros_like(m)
+        q_idx = torch.arange(q_start, q_start + tq, device=q.device)
+        for t0 in range(0, min(tk, q_start + tq), chunk):
+            t1 = min(t0 + chunk, tk)
+            kt = k[:, :, t0:t1]
+            vt = v[:, :, t0:t1]
+            if n_rep > 1:
+                kt = kt.repeat_interleave(n_rep, dim=1)
+                vt = vt.repeat_interleave(n_rep, dim=1)
+            scores = torch.matmul(qf, kt.float().transpose(-2, -1)) * scale
+            k_idx = torch.arange(t0, t1, device=q.device)
+            scores = scores.masked_fill(k_idx > q_idx[:, None], float("-inf"))
+            block_m = scores.amax(dim=-1, keepdim=True)
+            new_m = torch.maximum(m, block_m)
+            alpha = torch.exp(m - new_m)
+            exp_s = torch.exp(scores - new_m)
+            out = out * alpha + torch.matmul(exp_s, vt.float())
+            denom = denom * alpha + exp_s.sum(dim=-1, keepdim=True)
+            m = new_m
+        return (out / denom.clamp(min=1e-6)).to(dtype=q.dtype)
 
     def _linear_chunks(linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
         if x.size(1) <= chunk:
@@ -121,7 +125,7 @@ def build_llama(spec: LlamaBuild) -> Any:
                         b, end - start, spec.n_heads, spec.head_dim
                     )
                     q = _apply_rope(q, cos[start:end], sin[start:end]).transpose(1, 2)
-                    y[:, :, start:end] = _sdpa_flash(q, k[:, :, :end], v[:, :, :end])
+                    y[:, :, start:end] = _tiled_causal_attn(q, k[:, :, :end], v[:, :, :end])
                     start = end
             return y
 
@@ -140,7 +144,7 @@ def build_llama(spec: LlamaBuild) -> Any:
                     b, end - start, spec.n_heads, spec.head_dim
                 )
                 q = _apply_rope(q, cos[start:end], sin[start:end]).transpose(1, 2)
-                y_c = _sdpa_flash(q, k[:, :, :end], v[:, :, :end])
+                y_c = _tiled_causal_attn(q, k[:, :, :end], v[:, :, :end])
                 y_c.backward(dy[:, :, start:end])
                 start = end
             return k.grad, v.grad, x.grad, w_q.grad, None, None
@@ -201,12 +205,9 @@ def build_llama(spec: LlamaBuild) -> Any:
     def _run_block(block: nn.Module, h: torch.Tensor) -> torch.Tensor:
         if spec.context_length < 200_000:
             return block(h)
-        try:
-            import deepspeed
-
-            return deepspeed.checkpointing.checkpoint(block, h)
-        except Exception:
-            return torch.utils.checkpoint.checkpoint(block, h, use_reentrant=False)
+        # Do not wrap DeepSpeed checkpoint in except-retry: a kernel error
+        # inside the block was re-run a second time on the same GPUs.
+        return torch.utils.checkpoint.checkpoint(block, h, use_reentrant=False)
 
     class LlamaLM(nn.Module):
         def __init__(self) -> None:
