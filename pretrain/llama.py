@@ -52,6 +52,8 @@ def build_llama(spec: LlamaBuild) -> Any:
         raise ValueError("n_heads must be divisible by n_kv_heads")
     n_rep = spec.n_heads // spec.n_kv_heads
     chunk = SEQ_CHUNK
+    # 200k scratch uses a larger RoPE base so positions do not wrap as fast
+    # as theta=10k. This is not YaRN / Phase-5 350k scaling.
     rope_base = 1_000_000.0 if spec.context_length >= 200_000 else 10_000.0
 
     class RMSNorm(nn.Module):
@@ -72,23 +74,67 @@ def build_llama(spec: LlamaBuild) -> Any:
         out = torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
         return out.flatten(-2)
 
-    def _sdpa_gqa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        try:
-            return F.scaled_dot_product_attention(
-                q, k, v, dropout_p=0.0, is_causal=True, enable_gqa=n_rep > 1
-            )
-        except TypeError:
-            if n_rep > 1:
-                k = k.repeat_interleave(n_rep, dim=1)
-                v = v.repeat_interleave(n_rep, dim=1)
-            return F.scaled_dot_product_attention(
-                q, k, v, dropout_p=0.0, is_causal=True
-            )
+    def _sdpa_flash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        # Math SDPA materializes 64×Q×K scores (~6 GiB at 200k). Never allow it.
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        kwargs = dict(dropout_p=0.0, is_causal=True)
+        backends = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+        with sdpa_kernel(backends):
+            try:
+                return F.scaled_dot_product_attention(
+                    q, k, v, enable_gqa=n_rep > 1, **kwargs
+                )
+            except TypeError:
+                if n_rep > 1:
+                    k = k.repeat_interleave(n_rep, dim=1)
+                    v = v.repeat_interleave(n_rep, dim=1)
+                return F.scaled_dot_product_attention(q, k, v, **kwargs)
 
     def _linear_chunks(linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
         if x.size(1) <= chunk:
             return linear(x)
         return torch.cat([linear(sl) for sl in x.split(chunk, dim=1)], dim=1)
+
+    class _ChunkedFlashAttn(torch.autograd.Function):
+        """One saved K/V; flash per query chunk. Avoids 391 SDPA graphs and math scores."""
+
+        @staticmethod
+        def forward(ctx, k, v, x, w_q, cos, sin):
+            ctx.save_for_backward(k, v, x, w_q, cos, sin)
+            b, _, s, _ = k.shape
+            y = k.new_empty(b, spec.n_heads, s, spec.head_dim)
+            with torch.no_grad():
+                start = 0
+                while start < s:
+                    end = min(start + chunk, s)
+                    q = F.linear(x[:, start:end], w_q).view(
+                        b, end - start, spec.n_heads, spec.head_dim
+                    )
+                    q = _apply_rope(q, cos[start:end], sin[start:end]).transpose(1, 2)
+                    y[:, :, start:end] = _sdpa_flash(q, k[:, :, :end], v[:, :, :end])
+                    start = end
+            return y
+
+        @staticmethod
+        def backward(ctx, dy):
+            k, v, x, w_q, cos, sin = ctx.saved_tensors
+            k = k.detach().requires_grad_(True)
+            v = v.detach().requires_grad_(True)
+            x = x.detach().requires_grad_(True)
+            w_q = w_q.detach().requires_grad_(True)
+            b, _, s, _ = k.shape
+            start = 0
+            while start < s:
+                end = min(start + chunk, s)
+                q = F.linear(x[:, start:end], w_q).view(
+                    b, end - start, spec.n_heads, spec.head_dim
+                )
+                q = _apply_rope(q, cos[start:end], sin[start:end]).transpose(1, 2)
+                y_c = _sdpa_flash(q, k[:, :, :end], v[:, :, :end])
+                y_c.backward(dy[:, :, start:end])
+                start = end
+            return k.grad, v.grad, x.grad, w_q.grad, None, None
 
     class Attention(nn.Module):
         def __init__(self) -> None:
@@ -110,19 +156,8 @@ def build_llama(spec: LlamaBuild) -> Any:
                 self.k(x).view(b, s, spec.n_kv_heads, spec.head_dim), cos, sin
             ).transpose(1, 2)
             v = self.v(x).view(b, s, spec.n_kv_heads, spec.head_dim).transpose(1, 2)
-            outs = []
-            start = 0
-            for sl in x.split(chunk, dim=1):
-                ks = sl.size(1)
-                q = _apply_rope(
-                    self.q(sl).view(b, ks, spec.n_heads, spec.head_dim),
-                    cos[start : start + ks],
-                    sin[start : start + ks],
-                ).transpose(1, 2)
-                end = start + ks
-                outs.append(_sdpa_gqa(q, k[:, :, :end], v[:, :, :end]))
-                start = end
-            y = torch.cat(outs, dim=2).transpose(1, 2).contiguous().view(b, s, spec.hidden_size)
+            y = _ChunkedFlashAttn.apply(k, v, x, self.q.weight, cos, sin)
+            y = y.transpose(1, 2).contiguous().view(b, s, spec.hidden_size)
             return _linear_chunks(self.o, y)
 
     class SwiGLU(nn.Module):
@@ -154,6 +189,16 @@ def build_llama(spec: LlamaBuild) -> Any:
             x = x + self.mlp(self.n2(x))
             return x
 
+    def _run_block(block: nn.Module, h: torch.Tensor) -> torch.Tensor:
+        if spec.context_length < 200_000:
+            return block(h)
+        try:
+            import deepspeed
+
+            return deepspeed.checkpointing.checkpoint(block, h)
+        except Exception:
+            return torch.utils.checkpoint.checkpoint(block, h, use_reentrant=False)
+
     class LlamaLM(nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -174,14 +219,8 @@ def build_llama(spec: LlamaBuild) -> Any:
 
         def forward(self, input_ids: torch.Tensor, labels: torch.Tensor | None = None):
             x = self.embed(input_ids)
-            use_ckpt = spec.context_length >= 200_000
             for block in self.blocks:
-                if use_ckpt:
-                    x = torch.utils.checkpoint.checkpoint(
-                        block, x, use_reentrant=False
-                    )
-                else:
-                    x = block(x)
+                x = _run_block(block, x)
             hidden = self.norm(x)
             if labels is None:
                 return _linear_chunks(self.lm_head, hidden), None
@@ -200,5 +239,5 @@ def build_llama(spec: LlamaBuild) -> Any:
             ntok = (tgt != 0).sum().to(dtype=total.dtype).clamp(min=1)
             return None, total / ntok
 
-    _ = math
+    _ = math  # kept for possible later μP scaling
     return LlamaLM()

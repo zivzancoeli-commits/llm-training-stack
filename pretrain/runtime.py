@@ -21,6 +21,7 @@ def build_zero3_config(recipe: ScratchRecipe, world: int) -> dict:
     """ZeRO-3 JSON. Persistence threshold 0 + CPU offload keeps 70B off HBM."""
     zero: dict = {
         "stage": 3,
+        # overlap_comm keeps a second gradient buffer; 200k cannot afford it.
         "overlap_comm": False,
         "contiguous_gradients": True,
         "reduce_bucket_size": 50_000_000,
@@ -33,7 +34,7 @@ def build_zero3_config(recipe: ScratchRecipe, world: int) -> dict:
     if recipe.cpu_offload:
         zero["offload_param"] = {"device": "cpu", "pin_memory": True}
         zero["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
-    return {
+    cfg = {
         "train_micro_batch_size_per_gpu": recipe.micro_batch_size,
         "gradient_accumulation_steps": recipe.grad_accum,
         "train_batch_size": recipe.micro_batch_size * recipe.grad_accum * world,
@@ -50,6 +51,14 @@ def build_zero3_config(recipe: ScratchRecipe, world: int) -> dict:
         "gradient_clipping": 1.0,
         "steps_per_print": 1,
     }
+    if recipe.cpu_offload:
+        cfg["activation_checkpointing"] = {
+            "partition_activations": True,
+            "cpu_checkpointing": True,
+            "contiguous_memory_optimization": True,
+            "number_checkpoints": recipe.n_layers,
+        }
+    return cfg
 
 
 def zero_init_kwargs(recipe: ScratchRecipe, ds_config: dict) -> dict:
@@ -57,7 +66,7 @@ def zero_init_kwargs(recipe: ScratchRecipe, ds_config: dict) -> dict:
 
     Calling ``Init(dtype=...)`` without the ZeRO-3 config leaves each rank with
     a full 70B copy (~140 GiB). That is the 114 GiB allocated / 1 GiB free
-    CUDA OOM from the first 8x H200 forward.
+    CUDA OOM from the first 8× H200 forward.
     """
     kwargs: dict = {
         "config_dict_or_path": ds_config,
@@ -102,7 +111,7 @@ def run_scratch(plan: ScratchPlan, *, data_roots: tuple[Path, ...] | None = None
     )
 
     class Packed(Dataset):
-        def __len__(self) -> int:
+        def __len__(self) -> None:
             return len(rows)
 
         def __getitem__(self, idx: int) -> dict:
@@ -181,6 +190,23 @@ def _run_zero3(plan: ScratchPlan, packed_cls, tokenizer) -> int:
         model_parameters=model.parameters(),
         config=ds_config,
     )
+    if recipe.cpu_offload:
+        try:
+            deepspeed.checkpointing.configure(
+                mpu_=None,
+                deepspeed_config=ds_config,
+                partition_activations=True,
+                contiguous_checkpointing=True,
+                num_checkpoints=recipe.n_layers,
+                checkpoint_in_cpu=True,
+            )
+        except TypeError:
+            try:
+                deepspeed.checkpointing.configure(None, deepspeed_config=ds_config)
+            except Exception:
+                pass
+        except Exception:
+            pass
     if engine.local_rank == 0 and torch.cuda.is_available():
         alloc = torch.cuda.memory_allocated() / 1024**3
         print(
