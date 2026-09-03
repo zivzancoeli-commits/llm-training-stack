@@ -55,6 +55,10 @@ def build_llama(spec: LlamaBuild) -> Any:
     # 200k scratch uses a larger RoPE base so positions do not wrap as fast
     # as theta=10k. This is not YaRN / Phase-5 350k scaling.
     rope_base = 1_000_000.0 if spec.context_length >= 200_000 else 10_000.0
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
 
     class RMSNorm(nn.Module):
         def __init__(self, dim: int, eps: float = 1e-6):
@@ -76,10 +80,15 @@ def build_llama(spec: LlamaBuild) -> Any:
 
     def _sdpa_flash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         # Math SDPA materializes 64×Q×K scores (~6 GiB at 200k). Never allow it.
+        # FLASH causal often rejects Lq != Lk (query chunks vs prefix K); use
+        # memory-efficient attention there instead of falling back to math.
         from torch.nn.attention import SDPBackend, sdpa_kernel
 
         kwargs = dict(dropout_p=0.0, is_causal=True)
-        backends = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+        if q.size(2) == k.size(2):
+            backends = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+        else:
+            backends = [SDPBackend.EFFICIENT_ATTENTION]
         with sdpa_kernel(backends):
             try:
                 return F.scaled_dot_product_attention(
