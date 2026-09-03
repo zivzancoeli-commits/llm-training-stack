@@ -9,10 +9,64 @@ from data_pipeline.token_budget import HARD_TOKEN_CAP
 from pretrain.corpus import iter_corpus_docs, tokenize_and_pack
 from pretrain.llama import LlamaBuild, build_llama
 from pretrain.planner import ScratchPlan
+from pretrain.recipes import ScratchRecipe
 
 DEEPSPEED_LAUNCH = (
-    "deepspeed --num_gpus 8 -m pretrain.train --recipe 70b_scratch --smoke"
+    "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+    "deepspeed --num_gpus 8 --module pretrain.train --recipe 70b_scratch --smoke"
 )
+
+
+def build_zero3_config(recipe: ScratchRecipe, world: int) -> dict:
+    """ZeRO-3 JSON. Persistence threshold 0 + CPU offload keeps 70B off HBM."""
+    zero: dict = {
+        "stage": 3,
+        "overlap_comm": False,
+        "contiguous_gradients": True,
+        "reduce_bucket_size": 50_000_000,
+        "stage3_prefetch_bucket_size": 50_000_000,
+        "stage3_param_persistence_threshold": 0,
+        "stage3_max_live_parameters": 1_000_000_000,
+        "stage3_max_reuse_distance": 1_000_000_000,
+        "stage3_gather_16bit_weights_on_model_save": True,
+    }
+    if recipe.cpu_offload:
+        zero["offload_param"] = {"device": "cpu", "pin_memory": True}
+        zero["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
+    return {
+        "train_micro_batch_size_per_gpu": recipe.micro_batch_size,
+        "gradient_accumulation_steps": recipe.grad_accum,
+        "train_batch_size": recipe.micro_batch_size * recipe.grad_accum * world,
+        "bf16": {"enabled": True},
+        "zero_optimization": zero,
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": recipe.lr,
+                "betas": [0.9, 0.95],
+                "weight_decay": recipe.weight_decay,
+            },
+        },
+        "gradient_clipping": 1.0,
+        "steps_per_print": 1,
+    }
+
+
+def zero_init_kwargs(recipe: ScratchRecipe, ds_config: dict) -> dict:
+    """kwargs for ``deepspeed.zero.Init``. Config is required or partitioning is a no-op.
+
+    Calling ``Init(dtype=...)`` without the ZeRO-3 config leaves each rank with
+    a full 70B copy (~140 GiB). That is the 114 GiB allocated / 1 GiB free
+    CUDA OOM from the first 8x H200 forward.
+    """
+    kwargs: dict = {
+        "config_dict_or_path": ds_config,
+        "enabled": True,
+    }
+    if recipe.cpu_offload:
+        kwargs["remote_device"] = "cpu"
+        kwargs["pin_memory"] = True
+    return kwargs
 
 
 def require_distributed_70b(n_params: int, zero_stage: int, env: dict[str, str] | None = None) -> None:
@@ -104,42 +158,10 @@ def _run_zero3(plan: ScratchPlan, packed_cls, tokenizer) -> int:
 
     recipe = plan.recipe
     world = max(int(os.environ.get("WORLD_SIZE", "8")), 1)
-    ds_config = {
-        "train_micro_batch_size_per_gpu": recipe.micro_batch_size,
-        "gradient_accumulation_steps": recipe.grad_accum,
-        "train_batch_size": recipe.micro_batch_size * recipe.grad_accum * world,
-        "bf16": {"enabled": True},
-        "zero_optimization": {
-            "stage": 3,
-            "overlap_comm": True,
-            "contiguous_gradients": True,
-        },
-        "optimizer": {
-            "type": "AdamW",
-            "params": {
-                "lr": recipe.lr,
-                "betas": [0.9, 0.95],
-                "weight_decay": recipe.weight_decay,
-            },
-        },
-        "gradient_clipping": 1.0,
-        "steps_per_print": 1,
-    }
-    if recipe.cpu_offload:
-        ds_config["zero_optimization"]["offload_param"] = {
-            "device": "cpu",
-            "pin_memory": True,
-        }
-        ds_config["zero_optimization"]["offload_optimizer"] = {
-            "device": "cpu",
-            "pin_memory": True,
-        }
-        ds_config["activation_checkpointing"] = {
-            "partition_activations": True,
-            "cpu_checkpointing": True,
-            "contiguous_memory_optimization": True,
-            "number_checkpoints": 16,
-        }
+    ds_config = build_zero3_config(recipe, world)
+    if not torch.distributed.is_initialized():
+        deepspeed.init_distributed()
+
     class _LossOnly(torch.nn.Module):
         def __init__(self, inner: torch.nn.Module):
             super().__init__()
@@ -150,13 +172,22 @@ def _run_zero3(plan: ScratchPlan, packed_cls, tokenizer) -> int:
             assert loss is not None
             return loss
 
-    with deepspeed.zero.Init(dtype=torch.bfloat16):
+    init_kw = zero_init_kwargs(recipe, ds_config)
+    init_kw["dtype"] = torch.bfloat16
+    with deepspeed.zero.Init(**init_kw):
         model = _LossOnly(build_llama(LlamaBuild.from_recipe(recipe)))
     engine, _, _, _ = deepspeed.initialize(
         model=model,
         model_parameters=model.parameters(),
         config=ds_config,
     )
+    if engine.local_rank == 0 and torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / 1024**3
+        print(
+            f"zero3 ready cpu_offload={recipe.cpu_offload} "
+            f"ctx={recipe.context_length} cuda_allocated_gb={alloc:.2f}",
+            flush=True,
+        )
     steps = recipe.smoke_steps if plan.smoke else recipe.max_steps
     loader = DataLoader(
         packed_cls(),

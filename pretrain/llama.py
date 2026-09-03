@@ -7,6 +7,11 @@ from typing import Any
 
 from pretrain.recipes import ScratchRecipe
 
+# 200k × 28,672 bf16 is ~11 GiB per MLP tensor; 200k × 32k logits ~12.8 GiB;
+# expanding GQA K/V to 64 heads is another ~3 GiB each. Chunk the sequence
+# and keep native GQA so 8× H200 can hold a training step.
+SEQ_CHUNK = 512
+
 
 @dataclass(frozen=True)
 class LlamaBuild:
@@ -46,8 +51,7 @@ def build_llama(spec: LlamaBuild) -> Any:
     if spec.n_heads % spec.n_kv_heads != 0:
         raise ValueError("n_heads must be divisible by n_kv_heads")
     n_rep = spec.n_heads // spec.n_kv_heads
-    # 200k scratch uses a larger RoPE base so positions do not wrap as fast
-    # as theta=10k. This is not YaRN / Phase-5 350k scaling.
+    chunk = SEQ_CHUNK
     rope_base = 1_000_000.0 if spec.context_length >= 200_000 else 10_000.0
 
     class RMSNorm(nn.Module):
@@ -59,6 +63,32 @@ def build_llama(spec: LlamaBuild) -> Any:
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             norm = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
             return self.weight * x * norm
+
+    def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+        cos = cos[None, :, None, :]
+        sin = sin[None, :, None, :]
+        out = torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
+        return out.flatten(-2)
+
+    def _sdpa_gqa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        try:
+            return F.scaled_dot_product_attention(
+                q, k, v, dropout_p=0.0, is_causal=True, enable_gqa=n_rep > 1
+            )
+        except TypeError:
+            if n_rep > 1:
+                k = k.repeat_interleave(n_rep, dim=1)
+                v = v.repeat_interleave(n_rep, dim=1)
+            return F.scaled_dot_product_attention(
+                q, k, v, dropout_p=0.0, is_causal=True
+            )
+
+    def _linear_chunks(linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+        if x.size(1) <= chunk:
+            return linear(x)
+        return torch.cat([linear(sl) for sl in x.split(chunk, dim=1)], dim=1)
 
     class Attention(nn.Module):
         def __init__(self) -> None:
@@ -72,35 +102,28 @@ def build_llama(spec: LlamaBuild) -> Any:
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             b, s, _ = x.shape
-            q = self.q(x).view(b, s, spec.n_heads, spec.head_dim)
-            k = self.k(x).view(b, s, spec.n_kv_heads, spec.head_dim)
-            v = self.v(x).view(b, s, spec.n_kv_heads, spec.head_dim)
             t = torch.arange(s, device=x.device, dtype=self.inv_freq.dtype)
             freqs = torch.outer(t, self.inv_freq)
             cos = torch.cos(freqs).to(x.dtype)
             sin = torch.sin(freqs).to(x.dtype)
-            q = _apply_rope(q, cos, sin)
-            k = _apply_rope(k, cos, sin)
-            if n_rep > 1:
-                k = k.repeat_interleave(n_rep, dim=2)
-                v = v.repeat_interleave(n_rep, dim=2)
-            y = F.scaled_dot_product_attention(
-                q.transpose(1, 2),
-                k.transpose(1, 2),
-                v.transpose(1, 2),
-                dropout_p=0.0,
-                is_causal=True,
-            )
-            y = y.transpose(1, 2).contiguous().view(b, s, spec.hidden_size)
-            return self.o(y)
-
-    def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        x1 = x[..., ::2]
-        x2 = x[..., 1::2]
-        cos = cos[None, :, None, :]
-        sin = sin[None, :, None, :]
-        out = torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1)
-        return out.flatten(-2)
+            k = _apply_rope(
+                self.k(x).view(b, s, spec.n_kv_heads, spec.head_dim), cos, sin
+            ).transpose(1, 2)
+            v = self.v(x).view(b, s, spec.n_kv_heads, spec.head_dim).transpose(1, 2)
+            outs = []
+            start = 0
+            for sl in x.split(chunk, dim=1):
+                ks = sl.size(1)
+                q = _apply_rope(
+                    self.q(sl).view(b, ks, spec.n_heads, spec.head_dim),
+                    cos[start : start + ks],
+                    sin[start : start + ks],
+                ).transpose(1, 2)
+                end = start + ks
+                outs.append(_sdpa_gqa(q, k[:, :, :end], v[:, :, :end]))
+                start = end
+            y = torch.cat(outs, dim=2).transpose(1, 2).contiguous().view(b, s, spec.hidden_size)
+            return _linear_chunks(self.o, y)
 
     class SwiGLU(nn.Module):
         def __init__(self) -> None:
@@ -110,7 +133,13 @@ def build_llama(spec: LlamaBuild) -> Any:
             self.down = nn.Linear(spec.intermediate_size, spec.hidden_size, bias=False)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.down(F.silu(self.gate(x)) * self.up(x))
+            if x.size(1) <= chunk:
+                return self.down(F.silu(self.gate(x)) * self.up(x))
+            parts = [
+                self.down(F.silu(self.gate(sl)) * self.up(sl))
+                for sl in x.split(chunk, dim=1)
+            ]
+            return torch.cat(parts, dim=1)
 
     class Block(nn.Module):
         def __init__(self) -> None:
@@ -153,15 +182,23 @@ def build_llama(spec: LlamaBuild) -> Any:
                     )
                 else:
                     x = block(x)
-            logits = self.lm_head(self.norm(x))
-            loss = None
-            if labels is not None:
-                loss = F.cross_entropy(
-                    logits[:, :-1, :].contiguous().view(-1, spec.vocab_size),
-                    labels[:, 1:].contiguous().view(-1),
+            hidden = self.norm(x)
+            if labels is None:
+                return _linear_chunks(self.lm_head, hidden), None
+            pred = hidden[:, :-1, :]
+            tgt = labels[:, 1:]
+            total = hidden.new_zeros(())
+            for i in range(0, pred.size(1), chunk):
+                logits = self.lm_head(pred[:, i : i + chunk])
+                chunk_tgt = tgt[:, i : i + chunk]
+                total = total + F.cross_entropy(
+                    logits.reshape(-1, spec.vocab_size),
+                    chunk_tgt.reshape(-1),
                     ignore_index=0,
+                    reduction="sum",
                 )
-            return logits, loss
+            ntok = (tgt != 0).sum().to(dtype=total.dtype).clamp(min=1)
+            return None, total / ntok
 
-    _ = math  # kept for possible later μP scaling
+    _ = math
     return LlamaLM()
