@@ -77,10 +77,14 @@ def build_parser() -> argparse.ArgumentParser:
     splan = sub.add_parser("scratch-plan", help="Print a from-scratch (random init) plan.")
     splan.add_argument("--recipe", default="100m_scratch")
     splan.add_argument("--full", action="store_true")
-    strain = sub.add_parser("scratch-train", help="From-scratch train. Dry-run without CUDA.")
+    strain = sub.add_parser(
+        "scratch-train",
+        help="From-scratch train (CUDA, or CPU+SSD offload for 5b_mac_scratch).",
+    )
     strain.add_argument("--recipe", default="100m_scratch")
     strain.add_argument("--full", action="store_true")
     strain.add_argument("--dry-run", action="store_true")
+    strain.add_argument("--resume", action="store_true")
     slaunch = sub.add_parser(
         "scratch-launch",
         help="Build (and optionally POST) an 8x H200 SXM from-scratch pod.",
@@ -132,7 +136,6 @@ def cmd_tour() -> int:
     print("8x H200 SXM is not billed until `lmm ft-launch --confirm` (FT) or")
     print("a real `scratch-train` on a CUDA node.")
     print("RunPod MCP (optional, FT pods): npx @runpod/mcp-server@latest add")
-    return 0
     return 0
 
 
@@ -239,6 +242,14 @@ def cmd_scratch_launch(
     from pretrain.recipes import load_scratch_recipe
 
     recipe_obj = load_scratch_recipe(recipe)
+    if recipe_obj.disk_offload or recipe_obj.gpu_type_id == "CPU":
+        print(
+            f"{recipe_obj.name} is local CPU + SSD offload on this Mac. "
+            "Do not rent a pod. Run:\n"
+            "  uv run lmm scratch-train --recipe 5b_mac_scratch",
+            file=sys.stderr,
+        )
+        return 2
     effective_dry = dry_run and not confirm
     if confirm and not git_url:
         print("Refusing --confirm without --git-url (the pod has to clone this repo).", file=sys.stderr)
@@ -300,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "scratch-plan":
         return cmd_scratch_plan(args.recipe, args.full)
     if args.cmd == "scratch-train":
-        return cmd_scratch_train(args.recipe, args.full, args.dry_run)
+        return cmd_scratch_train(args.recipe, args.full, args.dry_run, args.resume)
     if args.cmd == "scratch-launch":
         return cmd_scratch_launch(
             recipe=args.recipe,
@@ -325,7 +336,7 @@ def cmd_scratch_plan(recipe: str, full: bool) -> int:
     return 0
 
 
-def cmd_scratch_train(recipe: str, full: bool, dry_run: bool) -> int:
+def cmd_scratch_train(recipe: str, full: bool, dry_run: bool, resume: bool = False) -> int:
     from pretrain.train import main as scratch_main
 
     argv = ["--recipe", recipe]
@@ -333,6 +344,8 @@ def cmd_scratch_train(recipe: str, full: bool, dry_run: bool) -> int:
         argv.append("--full")
     if dry_run:
         argv.append("--dry-run")
+    if resume:
+        argv.append("--resume")
     return scratch_main(argv)
 
 

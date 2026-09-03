@@ -87,7 +87,12 @@ def require_distributed_70b(n_params: int, zero_stage: int, env: dict[str, str] 
             )
 
 
-def run_scratch(plan: ScratchPlan, *, data_roots: tuple[Path, ...] | None = None) -> int:
+def run_scratch(
+    plan: ScratchPlan,
+    *,
+    data_roots: tuple[Path, ...] | None = None,
+    resume: bool = False,
+) -> int:
     try:
         import torch
         from torch.utils.data import DataLoader, Dataset
@@ -111,28 +116,50 @@ def run_scratch(plan: ScratchPlan, *, data_roots: tuple[Path, ...] | None = None
     )
 
     class Packed(Dataset):
-        def __len__(self) -> None:
+        def __len__(self) -> int:
             return len(rows)
 
         def __getitem__(self, idx: int) -> dict:
             ids = torch.tensor(rows[idx], dtype=torch.long)
             return {"input_ids": ids, "labels": ids.clone()}
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if recipe.disk_offload:
+        from pretrain.disk_offload import run_disk_offload
+
+        return run_disk_offload(plan, Packed, tokenizer, resume=resume)
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     if recipe.n_params >= 70_000_000_000 and device.type != "cuda":
         raise RuntimeError("70b_scratch needs 8x H200 CUDA; this machine has none")
 
     if recipe.zero_stage >= 3 and device.type == "cuda":
         return _run_zero3(plan, Packed, tokenizer)
-
     model = build_llama(LlamaBuild.from_recipe(recipe))
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    dtype = torch.bfloat16 if device.type == "cuda" else (
+        torch.float16 if device.type == "mps" else torch.float32
+    )
     model = model.to(device=device, dtype=dtype)
     opt = torch.optim.AdamW(model.parameters(), lr=recipe.lr, weight_decay=recipe.weight_decay)
     steps = recipe.smoke_steps if plan.smoke else recipe.max_steps
     loader = DataLoader(Packed(), batch_size=recipe.micro_batch_size, shuffle=True)
     model.train()
+    out = Path("outputs") / recipe.name
+    checkpoint = out / "latest.pt"
     step = 0
+    if resume:
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"resume requested but checkpoint does not exist: {checkpoint}")
+        saved = torch.load(checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(saved["model"])
+        opt.load_state_dict(saved["optimizer"])
+        step = int(saved["step"])
+        print(f"resumed step={step} from {checkpoint}", flush=True)
+    opt.zero_grad(set_to_none=True)
     while step < steps:
         for batch in loader:
             if step >= steps:
@@ -144,13 +171,26 @@ def run_scratch(plan: ScratchPlan, *, data_roots: tuple[Path, ...] | None = None
             if (step + 1) % recipe.grad_accum == 0:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
+                updates = (step + 1) // recipe.grad_accum
+                if recipe.checkpoint_every and updates % recipe.checkpoint_every == 0:
+                    _save_local_checkpoint(torch, checkpoint, model, opt, step + 1)
             step += 1
             print(f"step={step} loss={float(loss.detach()):.4f}", flush=True)
-    out = Path("outputs") / recipe.name
     out.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict(), "step": step}, out / "scratch.pt")
+    _save_local_checkpoint(torch, checkpoint, model, opt, step)
     tokenizer.save(out / "tokenizer.json")
     return 0
+
+
+def _save_local_checkpoint(torch, path: Path, model, optimizer, step: int) -> None:
+    """Atomically save model + optimizer so interruption cannot corrupt latest.pt."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    torch.save(
+        {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step},
+        temporary,
+    )
+    temporary.replace(path)
 
 
 def _run_zero3(plan: ScratchPlan, packed_cls, tokenizer) -> int:
