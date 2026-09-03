@@ -29,7 +29,11 @@ training is random init on **1M tokens preferred, or less (2.5M hard cap)**:
 uv run lmm scratch-plan --recipe 100m_scratch
 uv run lmm scratch-plan --recipe 70b_scratch
 uv run lmm scratch-train --recipe 100m_scratch --dry-run
+uv run lmm scratch-plan --recipe 5b_mac_scratch
 ```
+
+`5b_mac_scratch` trains on a **16GB DDR3 Intel Mac** by streaming layers
+from SSD (no MPS). See [`pretrain/README.md`](pretrain/README.md).
 
 That is **not** Qwen. `lmm ft-launch` remains an optional instruct FT.
 

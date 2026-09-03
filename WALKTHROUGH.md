@@ -6,6 +6,8 @@ setting fire to an 8x H200 bill.
 There is a from-scratch loop (`lmm scratch-plan` / `scratch-train`)
 with **random init** and a **1M-token cap** (2.5M hard; prefer 1M or less). It is not Qwen.
 What you can still do on a laptop: pytest, dry-run plans, review data.
+A 16GB DDR3 Intel Mac can run `5b_mac_scratch` only via SSD offload
+(see `pretrain/README.md`); it will not use MPS.
 
 ## 0. One-time setup (laptop, no GPU)
 
@@ -201,14 +203,32 @@ params/Adam sit in host RAM). Pick an 8× H200 SXM SKU with **a lot of
 system RAM** (on the order of a terabyte). The 300GB volume is not the
 offload device.
 
+If a run died with CUDA OOM, kill leftover ranks, refresh `llama.py` and
+`runtime.py` from GitHub `main`, confirm the flash-attn strings, then
+rerun smoke. Do **not** leave 8× H200 idle after the job dies — stop or
+terminate the pod.
+
 ```bash
-deepspeed --num_gpus 8 -m pretrain.train --recipe 70b_scratch --smoke
+pkill -f 'pretrain.train' || true
+cd /workspace/lmm   # or /workspace/lmm-training-stack
+curl -fsSL -o pretrain/llama.py   https://raw.githubusercontent.com/zivzancoeli-commits/llm-training-stack/main/pretrain/llama.py
+curl -fsSL -o pretrain/runtime.py https://raw.githubusercontent.com/zivzancoeli-commits/llm-training-stack/main/pretrain/runtime.py
+grep -n 'FLASH_ATTENTION\|_ChunkedFlashAttn\|cpu_checkpointing' pretrain/llama.py pretrain/runtime.py
+
+python -m pip install pyyaml pytest deepspeed
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+deepspeed --num_gpus 8 --module pretrain.train --recipe 70b_scratch --smoke
 ```
 
-You want finite `step=… loss=…` lines. Then, only if that worked:
+If grep does not show `FLASH_ATTENTION` / `_ChunkedFlashAttn`, GitHub is
+stale — do not launch. After ZeRO-3 init you should see
+`zero3 ready … cuda_allocated_gb=` well under ~20 (the working init was
+~0.09). Quiet CPU for 10–90 min is the tokenizer. Then finite
+`step=… loss=…` lines. **No `--full` until smoke is finite.**
 
 ```bash
-deepspeed --num_gpus 8 -m pretrain.train --recipe 70b_scratch --full
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+deepspeed --num_gpus 8 --module pretrain.train --recipe 70b_scratch --full
 ```
 
 Checkpoints land in `outputs/70b_scratch/`. Stop the pod when you are

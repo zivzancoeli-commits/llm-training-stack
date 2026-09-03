@@ -67,12 +67,22 @@ def test_scratch_launch_default_is_dry_run_and_deepspeed(capsys: pytest.CaptureF
     joined = " ".join(payload["body"]["dockerStartCmd"])
     assert "pretrain.train" in joined
     assert "deepspeed" in joined
+    assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" in joined
     assert "fine_tune.train" not in joined
     assert "github.com/zivzancoeli-commits/llm--dataset" in joined
     assert "find_takehome_zip" in joined
     assert payload["body"]["env"]["LMM_GIT_URL"] == (
         "https://github.com/zivzancoeli-commits/llm-training-stack.git"
     )
+
+
+def test_scratch_launch_rejects_cpu_disk_offload(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["scratch-launch", "--recipe", "5b_mac_scratch"]) == 2
+    err = capsys.readouterr().err
+    assert "SSD offload" in err
+    assert "scratch-train" in err
 
 
 def test_scratch_launch_confirm_without_git_url_fails() -> None:
