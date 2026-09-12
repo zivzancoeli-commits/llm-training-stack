@@ -19,6 +19,8 @@ def test_bpe_roundtrip_and_pack() -> None:
     ids = tok.encode("hello")
     assert ids[0] == tok.bos_id
     assert ids[-1] == tok.eos_id
+    body = tok.decode(ids)
+    assert "hello" in body
     rows = pack_ids([1, 2, 3, 4, 5], seq_len=4, pad_id=0)
     assert rows[0] == [1, 2, 3, 4]
     assert rows[1] == [5, 0, 0, 0]
@@ -156,6 +158,41 @@ def test_disk_offload_store_trains_one_step_and_resumes(tmp_path: Path) -> None:
     resumed = DiskLayerStore(tmp_path / "offload", spec)
     embed = resumed.load_embed()
     assert torch.equal(embed.weight.detach(), after)
+
+
+def test_disk_offload_generate_emits_tokens(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    from data_pipeline.tokenization.bpe import Tokenizer, train_bpe
+    from pretrain.disk_offload import DiskLayerStore, generate_ids
+    from pretrain.llama import LlamaBuild, llama_parts
+
+    spec = LlamaBuild(
+        n_layers=2,
+        hidden_size=32,
+        n_heads=4,
+        n_kv_heads=2,
+        head_dim=8,
+        intermediate_size=64,
+        vocab_size=300,
+        context_length=16,
+    )
+    parts = llama_parts(spec)
+    store = DiskLayerStore(tmp_path / "offload", spec)
+    store.initialize(parts)
+    tok = Tokenizer(train_bpe(["hello world hello"], vocab_size=300, max_chars=80))
+    prompt = [tok.bos_id, *tok.encode("hi", add_special=False)]
+    ids = generate_ids(
+        store,
+        spec,
+        parts,
+        prompt,
+        max_new=4,
+        temperature=0.0,
+        eos_id=tok.eos_id,
+        pad_id=tok.pad_id,
+    )
+    assert len(ids) > len(prompt)
+    assert isinstance(tok.decode(ids[len(prompt) :]), str)
 
 
 def test_zero3_init_offloads_70b_to_cpu() -> None:

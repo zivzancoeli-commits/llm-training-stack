@@ -112,6 +112,34 @@ class Tokenizer:
             new_id = BYTE_OFFSET + 256 + self._merge_ranks[(a, b)]
             ids = ids[:best_i] + [new_id] + ids[best_i + 2 :]
 
+    def decode(self, ids: list[int]) -> str:
+        """UTF-8 from token ids. Specials are dropped; invalid bytes are replaced."""
+        raw: list[int] = []
+        for token_id in ids:
+            raw.extend(self._bytes_for_id(int(token_id)))
+        return bytes(raw).decode("utf-8", errors="replace")
+
+    def _bytes_for_id(self, token_id: int) -> list[int]:
+        if token_id < BYTE_OFFSET:
+            return []
+        stack = [token_id]
+        out: list[int] = []
+        base = BYTE_OFFSET + 256
+        while stack:
+            current = stack.pop()
+            if current < BYTE_OFFSET:
+                continue
+            if current < base:
+                out.append(current - BYTE_OFFSET)
+                continue
+            index = current - base
+            if index < 0 or index >= len(self.vocab.merges):
+                continue
+            left, right = self.vocab.merges[index]
+            stack.append(right)
+            stack.append(left)
+        return out
+
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(self.vocab.to_json(), indent=2) + "\n")
 

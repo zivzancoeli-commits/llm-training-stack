@@ -85,6 +85,12 @@ def test_scratch_launch_rejects_cpu_disk_offload(
     assert "scratch-train" in err
 
 
+def test_scratch_generate_help() -> None:
+    with pytest.raises(SystemExit) as exited:
+        main(["scratch-generate", "--help"])
+    assert exited.value.code == 0
+
+
 def test_scratch_launch_confirm_without_git_url_fails() -> None:
     assert main(["scratch-launch", "--confirm", "--recipe", "70b_scratch"]) == 2
 

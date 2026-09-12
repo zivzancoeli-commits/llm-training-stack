@@ -85,6 +85,19 @@ def build_parser() -> argparse.ArgumentParser:
     strain.add_argument("--full", action="store_true")
     strain.add_argument("--dry-run", action="store_true")
     strain.add_argument("--resume", action="store_true")
+    sgen = sub.add_parser(
+        "scratch-generate",
+        help="Sample from a trained 5b_mac_scratch SSD-offload checkpoint.",
+    )
+    sgen.add_argument("--recipe", default="5b_mac_scratch")
+    sgen.add_argument("--prompt", default="The way a lock works is")
+    sgen.add_argument("--tokens", type=int, default=32)
+    sgen.add_argument("--temperature", type=float, default=0.8)
+    sgen.add_argument(
+        "--out-dir",
+        default="",
+        help="Directory with tokenizer.json and offload/. Default outputs/<recipe>/",
+    )
     slaunch = sub.add_parser(
         "scratch-launch",
         help="Build (and optionally POST) an 8x H200 SXM from-scratch pod.",
@@ -312,6 +325,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_scratch_plan(args.recipe, args.full)
     if args.cmd == "scratch-train":
         return cmd_scratch_train(args.recipe, args.full, args.dry_run, args.resume)
+    if args.cmd == "scratch-generate":
+        return cmd_scratch_generate(
+            recipe=args.recipe,
+            prompt=args.prompt,
+            tokens=args.tokens,
+            temperature=args.temperature,
+            out_dir=args.out_dir,
+        )
     if args.cmd == "scratch-launch":
         return cmd_scratch_launch(
             recipe=args.recipe,
@@ -347,6 +368,25 @@ def cmd_scratch_train(recipe: str, full: bool, dry_run: bool, resume: bool = Fal
     if resume:
         argv.append("--resume")
     return scratch_main(argv)
+
+
+def cmd_scratch_generate(
+    *,
+    recipe: str,
+    prompt: str,
+    tokens: int,
+    temperature: float,
+    out_dir: str,
+) -> int:
+    from pretrain.disk_offload import run_generate
+
+    return run_generate(
+        recipe_name=recipe,
+        prompt=prompt,
+        max_new=tokens,
+        temperature=temperature,
+        out_dir=Path(out_dir) if out_dir else None,
+    )
 
 
 if __name__ == "__main__":
