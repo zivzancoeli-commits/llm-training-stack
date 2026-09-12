@@ -48,3 +48,16 @@ Checkpoints are the per-layer files under
 not a single 70GB `latest.pt`. Delete that directory only if you want a
 fresh random init. Do not `scratch-launch` this recipe; it is not a
 RunPod job.
+
+## Sample from a finished 5B Mac run
+
+After `step=300` the shards and tokenizer live under
+`outputs/5b_mac_scratch/`. Generation reloads every layer from SSD for
+each new token (tens of seconds per token on a 13-inch Intel Mac). The
+text will not be fluent.
+
+```bash
+cd ~/llm-training-stack
+uv run lmm scratch-generate --recipe 5b_mac_scratch \
+  --prompt "The way a lock works is" --tokens 32
+```
