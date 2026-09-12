@@ -476,3 +476,138 @@ def run_disk_offload(
     tokenizer.save(out / "tokenizer.json")
     store.save_counters(step, opt_step)
     return 0
+
+
+def stream_hidden(store: DiskLayerStore, spec: LlamaBuild, parts: Any, input_ids: Any) -> Any:
+    """Forward-only residual. One block in RAM; no activation files."""
+    import torch
+
+    embed = store.load_embed()
+    embed.eval()
+    with torch.no_grad():
+        hidden = embed(input_ids)
+    del embed
+    _release()
+    for index in range(spec.n_layers):
+        block = store.load_block(parts, index)
+        block.eval()
+        with torch.no_grad():
+            hidden = block(hidden)
+        del block
+        _release()
+    return hidden
+
+
+def last_token_logits(store: DiskLayerStore, spec: LlamaBuild, parts: Any, hidden: Any) -> Any:
+    import torch
+    from torch.nn import functional as F
+
+    norm = store.load_norm(parts)
+    embed = store.load_embed()
+    norm.eval()
+    embed.eval()
+    with torch.no_grad():
+        logits = F.linear(norm(hidden[:, -1:, :]), embed.weight)[0, 0]
+    del norm, embed
+    _release()
+    return logits
+
+
+def sample_token(logits: Any, *, temperature: float, pad_id: int) -> int:
+    import torch
+
+    scores = logits.clone()
+    scores[pad_id] = float("-inf")
+    if temperature <= 0:
+        return int(torch.argmax(scores).item())
+    probs = torch.softmax(scores.float() / temperature, dim=-1)
+    return int(torch.multinomial(probs, 1).item())
+
+
+def generate_ids(
+    store: DiskLayerStore,
+    spec: LlamaBuild,
+    parts: Any,
+    prompt_ids: list[int],
+    *,
+    max_new: int,
+    temperature: float,
+    eos_id: int,
+    pad_id: int,
+) -> list[int]:
+    import torch
+
+    ids = list(prompt_ids)
+    if not ids:
+        raise ValueError("prompt_ids must be non-empty")
+    for _ in range(max_new):
+        if len(ids) >= spec.context_length:
+            break
+        input_ids = torch.tensor([ids], dtype=torch.long)
+        hidden = stream_hidden(store, spec, parts, input_ids)
+        logits = last_token_logits(store, spec, parts, hidden)
+        del hidden, input_ids
+        _release()
+        token = sample_token(logits, temperature=temperature, pad_id=pad_id)
+        ids.append(token)
+        if token == eos_id:
+            break
+    return ids
+
+
+def run_generate(
+    *,
+    recipe_name: str = "5b_mac_scratch",
+    prompt: str,
+    max_new: int = 32,
+    temperature: float = 0.8,
+    out_dir: Path | None = None,
+) -> int:
+    import torch
+
+    from data_pipeline.tokenization.bpe import Tokenizer
+    from pretrain.recipes import load_scratch_recipe
+
+    recipe = load_scratch_recipe(recipe_name)
+    spec = LlamaBuild.from_recipe(recipe)
+    parts = llama_parts(spec)
+    out = Path(out_dir) if out_dir is not None else Path("outputs") / recipe.name
+    store = DiskLayerStore(out / "offload", spec)
+    tok_path = out / "tokenizer.json"
+    if not store.embed_path().is_file() or not store.block_path(0).is_file():
+        raise FileNotFoundError(
+            f"no trained shards under {store.root}. Train first, then generate."
+        )
+    if not tok_path.is_file():
+        raise FileNotFoundError(f"missing tokenizer at {tok_path}")
+    tokenizer = Tokenizer.load(tok_path)
+    torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+    prompt_ids = [tokenizer.bos_id, *tokenizer.encode(prompt, add_special=False)]
+    print(
+        "disk-offload generate: reloads every layer from SSD per token. "
+        "Expect tens of seconds per token. Output will not be fluent.",
+        flush=True,
+    )
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    ids = list(prompt_ids)
+    for _ in range(max(0, max_new)):
+        if len(ids) >= spec.context_length:
+            break
+        hidden = stream_hidden(
+            store, spec, parts, torch.tensor([ids], dtype=torch.long)
+        )
+        logits = last_token_logits(store, spec, parts, hidden)
+        del hidden
+        _release()
+        token = sample_token(
+            logits, temperature=temperature, pad_id=tokenizer.pad_id
+        )
+        ids.append(token)
+        if token == tokenizer.eos_id:
+            break
+        sys.stdout.write(tokenizer.decode([token]))
+        sys.stdout.flush()
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return 0
